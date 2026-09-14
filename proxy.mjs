@@ -28,6 +28,9 @@ function loadConfig() {
     fingerprintSalt: '',
     deviceProjectDir: '', // 伪造的项目目录（留空则用内置的 C:\Users\dev\projects\app） // 改这个值 = 让所有账号换一台设备（见设备指纹注释）
     emptySystemPlaceholder: true, // 无 system prompt 时发空格占位，阻止 CC 上游注入 ~7.5K token 默认提示词（issue #17）
+    defaultModel: 'deepseek/deepseek-v4-flash',
+    remapClaudeAliases: false, // true 时把 Claude Code 的 sonnet/opus/haiku/fable 改写到 defaultModel（Go 套餐没有 Claude）
+    modelAliases: {}, // 精确覆盖，优先于 remapClaudeAliases，如 { "claude-sonnet-4-6": "deepseek/deepseek-v4-flash" }
   };
 
   const configPath = resolve(__dirname, 'config.json');
@@ -53,11 +56,33 @@ function loadConfig() {
   if (process.env.CC_CLI_MODE) defaults.cliMode = process.env.CC_CLI_MODE;
   if (process.env.CC_CLI_SESSION_MODE) defaults.cliSessionMode = process.env.CC_CLI_SESSION_MODE;
   if (process.env.CC_EMPTY_SYSTEM_PLACEHOLDER) defaults.emptySystemPlaceholder = process.env.CC_EMPTY_SYSTEM_PLACEHOLDER !== 'false';
+  if (process.env.CC_DEFAULT_MODEL) defaults.defaultModel = process.env.CC_DEFAULT_MODEL;
+  if (process.env.CC_REMAP_CLAUDE_ALIASES !== undefined) {
+    defaults.remapClaudeAliases = process.env.CC_REMAP_CLAUDE_ALIASES === '1' || process.env.CC_REMAP_CLAUDE_ALIASES === 'true';
+  }
 
   return defaults;
 }
 
 const CFG = loadConfig();
+
+const CLAUDE_ALIAS_RE = /^(claude-(sonnet|opus|haiku|fable)|sonnet|opus|haiku|fable)\b/i;
+
+function resolveModel(model) {
+  const requested = String(model || '').trim();
+  const fallback = CFG.defaultModel || 'deepseek/deepseek-v4-flash';
+  const aliases = CFG.modelAliases && typeof CFG.modelAliases === 'object' ? CFG.modelAliases : {};
+  if (requested && aliases[requested]) {
+    const mapped = aliases[requested];
+    if (mapped !== requested) log('info', 'Model alias applied', { from: requested, to: mapped });
+    return mapped;
+  }
+  if (CFG.remapClaudeAliases && CLAUDE_ALIAS_RE.test(requested || 'claude-sonnet')) {
+    log('info', 'Remapped Claude alias to default model', { from: requested || '(empty)', to: fallback });
+    return fallback;
+  }
+  return requested || fallback;
+}
 
 // ── 设备指纹（形态与哈希逐字对齐官方 CLI 1.53.1） ──────
 // CPU 型号与核心数对应表（仅 Windows x64）
@@ -572,11 +597,12 @@ function buildCcRequest(openaiReq) {
       }
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
+          const fnArgs = openaiToolArgs(tc);
           parts.push({
             type: 'tool-call',
             toolCallId: tc.id,
             toolName: tc.function?.name || '',
-            input: (typeof tc.function?.arguments === 'string' ? tryParseJSON(tc.function.arguments) : (tc.function?.arguments || {})),
+            input: (typeof fnArgs === 'string' ? tryParseJSON(fnArgs) : (fnArgs || {})),
           });
         }
       }
@@ -699,6 +725,19 @@ function tryParseJSON(str) {
   try { return JSON.parse(str); } catch { return {}; }
 }
 
+// OpenAI tool_calls[].function.arguments。用方括号读取，避免运行时/IDE 把 `.function.arguments`
+// 当成已废弃的 Function.arguments。
+function openaiToolArgs(tc) {
+  const fn = tc && tc['function'];
+  return fn ? fn['arguments'] : undefined;
+}
+
+function openaiToolFunction(name, args) {
+  const spec = { name: name || '' };
+  spec['arguments'] = args ?? '{}';
+  return spec;
+}
+
 // ── CC NDJSON → OpenAI SSE 转换 ────────────────────
 
 function createSseTranslator(model, completionId, created) {
@@ -759,7 +798,7 @@ function createSseTranslator(model, completionId, created) {
           const id = event.toolCallId || `call_${Date.now()}_${toolCallIndex}`;
           const name = event.toolName || '';
           const args = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {});
-          const tcEntry = { index: toolCallIndex, id, type: 'function', function: { name, arguments: args } };
+          const tcEntry = { index: toolCallIndex, id, type: 'function', function: openaiToolFunction(name, args) };
           const delta = chunkIndex === 0
             ? { role: 'assistant', content: null, tool_calls: [tcEntry] }
             : { tool_calls: [tcEntry] };
@@ -1114,6 +1153,8 @@ async function handleChatCompletions(req, res) {
     return;
   }
 
+  openaiReq.model = resolveModel(openaiReq.model);
+
   const stream = openaiReq.stream === true;
   const model = openaiReq.model || 'deepseek/deepseek-v4-flash';
   const completionId = `chatcmpl-${randomUUID().slice(0, 12)}`;
@@ -1350,10 +1391,10 @@ async function handleChatCompletions(req, res) {
                 toolCalls.push({
                   id: event.toolCallId || ('call_' + randomUUID().slice(0, 8)),
                   type: 'function',
-                  function: {
-                    name: event.toolName || '',
-                    arguments: typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
-                  },
+                  function: openaiToolFunction(
+                    event.toolName || '',
+                    typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
+                  ),
                 });
                 break;
               case 'finish':
@@ -1496,7 +1537,7 @@ function buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage,
   if (toolCalls) {
     for (const tc of toolCalls) {
       let input = {};
-      try { input = JSON.parse(tc.function.arguments); } catch { input = {}; }
+      try { input = JSON.parse(openaiToolArgs(tc)); } catch { input = {}; }
       content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
     }
   }
@@ -1576,10 +1617,7 @@ function convertAnthropicToOpenAI(anthropicReq) {
           toolCalls.push({
             id: block.id,
             type: 'function',
-            function: {
-              name: block.name,
-              arguments: JSON.stringify(block.input || {}),
-            },
+            function: openaiToolFunction(block.name, JSON.stringify(block.input || {})),
           });
         }
       }
@@ -1953,8 +1991,10 @@ async function handleMessages(req, res) {
     return;
   }
 
+  anthropicReq.model = resolveModel(anthropicReq.model);
+
   const stream = anthropicReq.stream === true;
-  const model = anthropicReq.model || 'claude-sonnet-4-6';
+  const model = anthropicReq.model || 'deepseek/deepseek-v4-flash';
 
   // Convert Anthropic → OpenAI → CC
   const openaiReq = convertAnthropicToOpenAI(anthropicReq);
@@ -2165,10 +2205,10 @@ async function handleMessages(req, res) {
                 (toolCalls = toolCalls || []).push({
                   id: event.toolCallId || ('call_' + randomUUID().slice(0, 8)),
                   type: 'function',
-                  function: {
-                    name: event.toolName || '',
-                    arguments: typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
-                  },
+                  function: openaiToolFunction(
+                    event.toolName || '',
+                    typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
+                  ),
                 });
                 break;
               case 'finish':
@@ -2380,7 +2420,7 @@ function convertResponsesToChat(respReq) {
           ensurePending().tool_calls.push({
             id: item.call_id || item.id || ('call_' + randomUUID().slice(0, 8)),
             type: 'function',
-            function: { name: item.name || '', arguments: item.arguments || '{}' },
+            function: openaiToolFunction(item.name || '', item['arguments'] || '{}'),
           });
           break;
         }
@@ -2466,11 +2506,11 @@ function buildResponsesOutput(fullText, thinkingText, toolCalls) {
     });
   }
   for (const tc of (toolCalls || [])) {
-    const rawArgs = tc.function ? tc.function.arguments : '{}';
+    const rawArgs = openaiToolArgs(tc) ?? '{}';
     output.push({
       type: 'function_call', id: newResponsesId('fc_'), call_id: tc.id,
       name: tc.function ? (tc.function.name || '') : '',
-      arguments: typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {}),
+      ['arguments']: typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {}),
       status: 'completed',
     });
   }
@@ -2556,7 +2596,7 @@ function createResponsesSseTranslator(model, responseId, created) {
       item.content = [{ type: 'output_text', text: current.textBuf, annotations: [] }];
       item.status = 'completed';
     } else if (current.kind === 'function_call') {
-      out.push(sse('response.function_call_arguments.done', { item_id: item.id, output_index: idx, arguments: item.arguments }));
+      out.push(sse('response.function_call_arguments.done', { item_id: item.id, output_index: idx, ['arguments']: item['arguments'] }));
       item.status = 'completed';
     } else if (current.kind === 'reasoning') {
       out.push(sse('response.reasoning_summary_text.done', { item_id: item.id, output_index: idx, summary_index: 0, text: current.textBuf }));
@@ -2645,9 +2685,9 @@ function createResponsesSseTranslator(model, responseId, created) {
           const args = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {});
           out.push.apply(out, openItem('function_call', {
             type: 'function_call', id: newResponsesId('fc_'), call_id: callId,
-            name: event.toolName || '', arguments: '', status: 'in_progress',
+            name: event.toolName || '', ['arguments']: '', status: 'in_progress',
           }));
-          current.item.arguments = args;
+          current.item['arguments'] = args;
           out.push(sse('response.function_call_arguments.delta', { item_id: current.item.id, output_index: current.index, delta: args }));
           break;
         }
@@ -2724,6 +2764,8 @@ async function handleResponses(req, res) {
       'Missing API key. Send in Authorization: Bearer <key> or x-api-key header');
     return;
   }
+
+  respReq.model = resolveModel(respReq.model);
 
   let chatReq = convertResponsesToChat(respReq);
   if (!chatReq.messages.length) {
@@ -2907,10 +2949,10 @@ async function handleResponses(req, res) {
               toolCalls.push({
                 id: event.toolCallId || ('call_' + randomUUID().slice(0, 8)),
                 type: 'function',
-                function: {
-                  name: event.toolName || '',
-                  arguments: typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
-                },
+                function: openaiToolFunction(
+                  event.toolName || '',
+                  typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
+                ),
               });
               break;
             }
@@ -3072,6 +3114,7 @@ server.listen(CFG.port, CFG.host, () => {
     api: CFG.apiBase,
     models: MODELS.length,
     session: '12h + 1h jitter, per API key',
+    remapClaudeAliases: CFG.remapClaudeAliases ? `on → ${CFG.defaultModel}` : 'off',
     zdr: CFG.zdr ? 'enabled (x-cmd-zdr: 1 on generation/init requests)' : 'off (CMD_ZDR=1 or per-request x-cmd-zdr: 1 to enable)',
     emptySystemPlaceholder: CFG.emptySystemPlaceholder ? 'on (space placeholder for requests without system prompt, issue #17)' : 'off',
     logFile: CFG.logFile || '(console only)',
