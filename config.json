@@ -8,5 +8,10 @@
   "logLevel": "info",
   "zdr": false,
   "defaultModel": "deepseek/deepseek-v4-flash",
-  "remapClaudeAliases": true
+  "remapClaudeAliases": true,
+  "modelAliases": {
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+    "deepseek-v4-flash-fast": "deepseek/deepseek-v4-flash-fast"
+  }
 }

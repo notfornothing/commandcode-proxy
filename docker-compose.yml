@@ -8,6 +8,8 @@ services:
       PORT: "3050"
       CC_STREAM_IDLE_MS: "300000"
       CC_NONSTREAM_IDLE_MS: "300000"
+      # Cloudflare 双栈时 Node 默认可能先打 IPv6；本机 IPv6 不稳会导致间歇 Upstream fetch failed
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://127.0.0.1:3050/health"]
