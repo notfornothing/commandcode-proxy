@@ -1,18 +1,17 @@
 services:
   proxy:
     build: .
-    ports:
-      # 宿主机只绑回环，避免和本机 3050 或其他服务抢端口；容器内仍是 3050
-      - "127.0.0.1:${PROXY_PORT:-13050}:3050"
+    network_mode: host
     environment:
-      PORT: "3050"
+      # 与 nginx 反代目标一致（原 compose 端口映射 127.0.0.1:13050→3050）
+      PORT: "13050"
       CC_STREAM_IDLE_MS: "300000"
       CC_NONSTREAM_IDLE_MS: "300000"
-      # Cloudflare 双栈时 Node 默认可能先打 IPv6；本机 IPv6 不稳会导致间歇 Upstream fetch failed
+      # 本机没有公网 IPv6；强制 IPv4，避免 Node 先连 IPv6 失败。出网直连，不走 7890
       NODE_OPTIONS: "--dns-result-order=ipv4first"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "http://127.0.0.1:3050/health"]
+      test: ["CMD", "wget", "--spider", "http://127.0.0.1:13050/health"]
       interval: 30s
       timeout: 3s
       retries: 3

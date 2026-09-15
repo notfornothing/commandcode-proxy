@@ -66,6 +66,62 @@ function loadConfig() {
 
 const CFG = loadConfig();
 
+// 出网代理（可选）：未设 HTTPS_PROXY 则直连；若设置需同时 NODE_USE_ENV_PROXY=1。此处仅启动日志
+const OUTBOUND_PROXY = (
+  process.env.HTTPS_PROXY || process.env.https_proxy ||
+  process.env.HTTP_PROXY || process.env.http_proxy || ''
+).trim();
+
+function formatFetchError(e) {
+  const cause = e?.cause;
+  return {
+    message: e?.message || String(e),
+    name: e?.name,
+    code: cause?.code || e?.code,
+    cause: cause ? {
+      message: cause.message,
+      code: cause.code,
+      errno: cause.errno,
+      syscall: cause.syscall,
+      address: cause.address,
+      port: cause.port,
+    } : undefined,
+  };
+}
+
+function isTransientFetchError(e) {
+  const msg = String(e?.message || '');
+  const code = e?.cause?.code || e?.code || '';
+  return (
+    msg.includes('fetch failed') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('EAI_AGAIN') ||
+    msg.includes('UND_ERR_SOCKET') ||
+    ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)
+  );
+}
+
+async function fetchWithRetry(url, options = {}, { retries = 2, label = 'upstream' } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, options);
+    } catch (e) {
+      lastErr = e;
+      const detail = formatFetchError(e);
+      if (attempt < retries && isTransientFetchError(e) && !options.signal?.aborted) {
+        const delayMs = 300 * (attempt + 1);
+        log('warn', `${label} fetch failed, retrying`, { attempt: attempt + 1, retries, delayMs, ...detail });
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
 const CLAUDE_ALIAS_RE = /^(claude-(sonnet|opus|haiku|fable)|sonnet|opus|haiku|fable)\b/i;
 
 function resolveModel(model) {
@@ -1122,12 +1178,12 @@ async function forwardToCC(body, apiKey, incomingHeaders = {}, signal, promptCac
     headers['x-cmd-zdr'] = '1';
   }
 
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
     signal,
-  });
+  }, { retries: 2, label: 'CC generate' });
 
   return response;
 }
@@ -1499,7 +1555,7 @@ async function handleChatCompletions(req, res) {
       res.setHeader('Retry-After', '5');
       sendJSON(res, 429, { error: { message: timeoutMsg, type: 'rate_limit_error', input_tokens: 0 }, retry_after: 5 });
     } else {
-      log('error', 'Upstream error', { message: e.message });
+      log('error', 'Upstream error', formatFetchError(e));
       try { abortController.abort(); } catch {} // 打断 CC 上游
       sendJSON(res, 502, { error: { message: `Upstream error: ${e.message}`, type: 'proxy_error', input_tokens: 0 }, retry_after: 10 });
     }
@@ -2290,7 +2346,7 @@ async function handleMessages(req, res) {
       res.setHeader('Retry-After', '5');
       sendAnthropicError(res, 429, 'rate_limit_error', timeoutMsg);
     } else {
-      log('error', 'Upstream error', { message: e.message });
+      log('error', 'Upstream error', formatFetchError(e));
       try { abortController.abort(); } catch {} // 打断 CC 上游
       sendAnthropicError(res, 502, 'proxy_error', `Upstream error: ${e.message}`, 10);
     }
@@ -3115,6 +3171,8 @@ server.listen(CFG.port, CFG.host, () => {
     models: MODELS.length,
     session: '12h + 1h jitter, per API key',
     remapClaudeAliases: CFG.remapClaudeAliases ? `on → ${CFG.defaultModel}` : 'off',
+    outboundProxy: OUTBOUND_PROXY || '(direct)',
+    ipv4First: String(process.env.NODE_OPTIONS || '').includes('ipv4first'),
     zdr: CFG.zdr ? 'enabled (x-cmd-zdr: 1 on generation/init requests)' : 'off (CMD_ZDR=1 or per-request x-cmd-zdr: 1 to enable)',
     emptySystemPlaceholder: CFG.emptySystemPlaceholder ? 'on (space placeholder for requests without system prompt, issue #17)' : 'off',
     logFile: CFG.logFile || '(console only)',
