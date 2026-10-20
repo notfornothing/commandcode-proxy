@@ -11,12 +11,5 @@
   "fingerprintSalt": "",
   "deviceProjectDir": "",
   "cliMode": "agent",
-  "cliSessionMode": "interactive",
-  "defaultModel": "deepseek/deepseek-v4-flash",
-  "remapClaudeAliases": true,
-  "modelAliases": {
-    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
-    "deepseek-v4-flash-fast": "deepseek/deepseek-v4-flash-fast"
-  }
+  "cliSessionMode": "interactive"
 }

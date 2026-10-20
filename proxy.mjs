@@ -32,9 +32,6 @@ function loadConfig() {
     deviceProjectDir: '', // 伪造的项目目录（留空则用内置的 C:\Users\dev\projects\app） // 改这个值 = 让所有账号换一台设备（见设备指纹注释）
     emptySystemPlaceholder: true, // 无 system prompt 时发空格占位，阻止 CC 上游注入 ~7.5K token 默认提示词（issue #17）
     upstreamProxy: '',            // 上游 HTTP 代理，如 http://127.0.0.1:7890（issue #18）
-    defaultModel: 'deepseek/deepseek-v4-flash',
-    remapClaudeAliases: false, // true 时把 Claude Code 的 sonnet/opus/haiku/fable 改写到 defaultModel（Go 套餐没有 Claude）
-    modelAliases: {}, // 精确覆盖，优先于 remapClaudeAliases，如 { "claude-sonnet-4-6": "deepseek/deepseek-v4-flash" }
   };
 
   const configPath = resolve(__dirname, 'config.json');
@@ -61,10 +58,6 @@ function loadConfig() {
   if (process.env.CC_CLI_SESSION_MODE) defaults.cliSessionMode = process.env.CC_CLI_SESSION_MODE;
   if (process.env.CC_EMPTY_SYSTEM_PLACEHOLDER) defaults.emptySystemPlaceholder = process.env.CC_EMPTY_SYSTEM_PLACEHOLDER !== 'false';
   if (process.env.CC_UPSTREAM_PROXY) defaults.upstreamProxy = process.env.CC_UPSTREAM_PROXY;
-  if (process.env.CC_DEFAULT_MODEL) defaults.defaultModel = process.env.CC_DEFAULT_MODEL;
-  if (process.env.CC_REMAP_CLAUDE_ALIASES !== undefined) {
-    defaults.remapClaudeAliases = process.env.CC_REMAP_CLAUDE_ALIASES === '1' || process.env.CC_REMAP_CLAUDE_ALIASES === 'true';
-  }
 
   return defaults;
 }
@@ -86,24 +79,6 @@ function formatFetchError(e) {
       port: cause.port,
     } : undefined,
   };
-}
-
-const CLAUDE_ALIAS_RE = /^(claude-(sonnet|opus|haiku|fable)|sonnet|opus|haiku|fable)\b/i;
-
-function resolveModel(model) {
-  const requested = String(model || '').trim();
-  const fallback = CFG.defaultModel || 'deepseek/deepseek-v4-flash';
-  const aliases = CFG.modelAliases && typeof CFG.modelAliases === 'object' ? CFG.modelAliases : {};
-  if (requested && aliases[requested]) {
-    const mapped = aliases[requested];
-    if (mapped !== requested) log('info', 'Model alias applied', { from: requested, to: mapped });
-    return mapped;
-  }
-  if (CFG.remapClaudeAliases && CLAUDE_ALIAS_RE.test(requested || 'claude-sonnet')) {
-    log('info', 'Remapped Claude alias to default model', { from: requested || '(empty)', to: fallback });
-    return fallback;
-  }
-  return requested || fallback;
 }
 
 // ── 设备指纹（形态与哈希逐字对齐官方 CLI；1.53.1 对齐，1.54.0 复核未变） ──
@@ -1601,8 +1576,6 @@ async function handleChatCompletions(req, res) {
     return;
   }
 
-  openaiReq.model = resolveModel(openaiReq.model);
-
   const stream = openaiReq.stream === true;
   const model = openaiReq.model || 'deepseek/deepseek-v4-flash';
   const completionId = `chatcmpl-${randomUUID().slice(0, 12)}`;
@@ -2640,10 +2613,8 @@ async function handleMessages(req, res) {
     return;
   }
 
-  anthropicReq.model = resolveModel(anthropicReq.model);
-
   const stream = anthropicReq.stream === true;
-  const model = anthropicReq.model || 'deepseek/deepseek-v4-flash';
+  const model = anthropicReq.model || 'claude-sonnet-4-6';
 
   // Convert Anthropic → OpenAI → CC
   let openaiReq = convertAnthropicToOpenAI(anthropicReq);
@@ -3640,8 +3611,6 @@ async function handleResponses(req, res) {
     return;
   }
 
-  respReq.model = resolveModel(respReq.model);
-
   let chatReq = convertResponsesToChat(respReq);
   if (!chatReq.messages.length) {
     sendResponsesError(res, 400, 'invalid_request_error', 'input is required');
@@ -4076,7 +4045,6 @@ server.listen(CFG.port, CFG.host, () => {
     api: CFG.apiBase,
     models: MODELS.length,
     session: 'content-derived x-session-id',
-    remapClaudeAliases: CFG.remapClaudeAliases ? `on → ${CFG.defaultModel}` : 'off',
     ipv4First: String(process.env.NODE_OPTIONS || '').includes('ipv4first'),
     zdr: CFG.zdr ? 'enabled (x-cmd-zdr: 1 on generation/init requests)' : 'off (CMD_ZDR=1 or per-request x-cmd-zdr: 1 to enable)',
     emptySystemPlaceholder: CFG.emptySystemPlaceholder ? 'on (space placeholder for requests without system prompt, issue #17)' : 'off',
