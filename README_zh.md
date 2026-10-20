@@ -1,5 +1,28 @@
 # Command Code Proxy
 
+公开镜像：https://hub.docker.com/r/notfornothing/commandcode-proxy
+
+## docker compose
+
+```yaml
+services:
+  proxy:
+    image: notfornothing/commandcode-proxy:latest
+    ports:
+      - "3050:3050"
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+```
+
+浏览器或客户端访问 http://127.0.0.1:3050 。API Key 放在请求头 `Authorization: Bearer user_...`，不要写进 compose。
+
+`services` 下面的 `proxy` 只是这个容器的名字，不是密钥，也不是配置项。
+
+以下为上游 README。
+
 > [English Docs](README.md)
 
 将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。单文件，零外部依赖。
